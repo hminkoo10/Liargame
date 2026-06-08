@@ -307,10 +307,13 @@ async def send_interaction_reply(
     view: discord.ui.View | None = None,
 ) -> None:
     embed = make_embed(description, title=title, color=color)
+    kwargs: dict[str, object] = {"embed": embed, "ephemeral": private}
+    if view is not None:
+        kwargs["view"] = view
     if interaction.response.is_done():
-        await interaction.followup.send(embed=embed, ephemeral=private, view=view)
+        await interaction.followup.send(**kwargs)
     else:
-        await interaction.response.send_message(embed=embed, ephemeral=private, view=view)
+        await interaction.response.send_message(**kwargs)
 
 
 async def send_embed(
@@ -322,7 +325,10 @@ async def send_embed(
     view: discord.ui.View | None = None,
 ) -> discord.Message | None:
     try:
-        return await channel.send(embed=make_embed(description, title=title, color=color), view=view)
+        kwargs: dict[str, object] = {"embed": make_embed(description, title=title, color=color)}
+        if view is not None:
+            kwargs["view"] = view
+        return await channel.send(**kwargs)
     except discord.DiscordException:
         return None
 
