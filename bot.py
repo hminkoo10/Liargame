@@ -1182,8 +1182,7 @@ async def run_discussion_phase(channel: discord.abc.Messageable, running: Runnin
                 round_number += 1
                 await send_embed(channel, f"발언 순서 {round_number}라운드를 시작합니다.", title="다음 라운드")
 
-            remaining = max(1, int(deadline - time.monotonic()))
-            turn_seconds = min(config.speech_seconds, remaining)
+            turn_seconds = config.speech_seconds
             control_view.set_current_speaker(player)
             await control_view.refresh_message()
             turn_view = SpeechTurnView(running, player)
@@ -1199,8 +1198,8 @@ async def run_discussion_phase(channel: discord.abc.Messageable, running: Runnin
 
             turn_deadline = time.monotonic() + turn_seconds
             try:
-                while time.monotonic() < deadline and time.monotonic() < turn_deadline:
-                    remaining_turn = max(1, int(min(deadline, turn_deadline) - time.monotonic()))
+                while time.monotonic() < turn_deadline:
+                    remaining_turn = max(1, int(turn_deadline - time.monotonic()))
                     result = await wait_for_discussion_event(control_view, remaining_turn)
                     if result == "extend":
                         deadline += config.discussion_extension_seconds
