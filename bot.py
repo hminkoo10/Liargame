@@ -453,8 +453,7 @@ def current_settings_text(prefix: str = "라이어게임 설정") -> str:
         f"관리자 역할: `{config.manager_role}`\n"
         f"기본 라이어 수: `{config.default_liar_count}`\n"
         f"인원: `{config.min_player_count}`-`{effective_max_player_count()}`명\n"
-        f"모집/토론/투표/추측: `{config.recruitment_seconds}`/`{config.discussion_seconds}`/"
-        f"`{config.vote_seconds}`/`{config.guess_seconds}`초\n"
+        f"모집/투표/추측: `{config.recruitment_seconds}`/`{config.vote_seconds}`/`{config.guess_seconds}`초\n"
         f"발언/연장: `{config.speech_seconds}`/`{config.discussion_extension_seconds}`초, "
         f"최대 `{config.max_discussion_extensions}`회\n"
         f"토론 슬로우모드: `{config.chat_slowmode_seconds}`초\n"
@@ -921,7 +920,8 @@ class SpeechTurnView(discord.ui.View):
 
 class DiscussionControlView(discord.ui.View):
     def __init__(self, running: RunningGame) -> None:
-        super().__init__(timeout=config.discussion_seconds + config.discussion_extension_seconds * config.max_discussion_extensions + 30)
+        num_players = len(running.game.players)
+        super().__init__(timeout=config.speech_seconds * num_players + config.discussion_extension_seconds * config.max_discussion_extensions + 30)
         self.running = running
         self.message: discord.Message | None = None
         self.current_speaker_id: int | None = None
@@ -1058,7 +1058,7 @@ class ContinueView(discord.ui.View):
             return
         self.yes_votes.add(interaction.user.id)
         if len(self.yes_votes) >= self.required_votes():
-            await send_interaction_reply(interaction, "과반수 달성! 다음 라운드를 시작합니다.", color=SUCCESS_EMBED_COLOR, private=True)
+            await send_interaction_reply(interaction, "전원 찬성! 다음 라운드를 시작합니다.", color=SUCCESS_EMBED_COLOR, private=True)
             self.done.set()
             self.stop()
         else:
@@ -1692,7 +1692,6 @@ async def show_categories(interaction: discord.Interaction, 검색어: str | Non
     최소인원="게임 시작 최소 인원",
     최대인원=f"게임 최대 인원. 최대 {MAX_GAME_PLAYERS}명",
     모집초="참가자 모집 시간",
-    토론초="토론 시간",
     발언초="한 사람당 발언 시간",
     연장초="토론 연장 1회당 추가 시간",
     최대연장="토론 연장 최대 횟수",
@@ -1709,7 +1708,6 @@ async def configure_game(
     최소인원: int | None = None,
     최대인원: int | None = None,
     모집초: int | None = None,
-    토론초: int | None = None,
     발언초: int | None = None,
     연장초: int | None = None,
     최대연장: int | None = None,
@@ -1730,8 +1728,6 @@ async def configure_game(
         config.max_player_count = 최대인원
     if 모집초 is not None:
         config.recruitment_seconds = 모집초
-    if 토론초 is not None:
-        config.discussion_seconds = 토론초
     if 발언초 is not None:
         config.speech_seconds = 발언초
     if 연장초 is not None:
