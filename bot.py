@@ -453,8 +453,7 @@ def current_settings_text(prefix: str = "라이어게임 설정") -> str:
         f"관리자 역할: `{config.manager_role}`\n"
         f"기본 라이어 수: `{config.default_liar_count}`\n"
         f"인원: `{config.min_player_count}`-`{effective_max_player_count()}`명\n"
-        f"모집/토론/투표/추측: `{config.recruitment_seconds}`/`{config.discussion_seconds}`/"
-        f"`{config.vote_seconds}`/`{config.guess_seconds}`초\n"
+        f"모집/투표/추측: `{config.recruitment_seconds}`/`{config.vote_seconds}`/`{config.guess_seconds}`초\n"
         f"발언/연장: `{config.speech_seconds}`/`{config.discussion_extension_seconds}`초, "
         f"최대 `{config.max_discussion_extensions}`회\n"
         f"토론 슬로우모드: `{config.chat_slowmode_seconds}`초\n"
@@ -529,6 +528,24 @@ async def unlock_channel_after_game(channel: discord.abc.Messageable, running: R
     for target, overwrite in running.original_channel_overwrites.items():
         with suppress(discord.DiscordException):
             await channel.set_permissions(target, overwrite=overwrite)
+
+
+async def temporarily_unlock_channel(channel: discord.abc.Messageable, running: RunningGame) -> None:
+    """이어하기 투표 중 @everyone 채팅 일시 허용"""
+    if not isinstance(channel, discord.TextChannel) or running.original_channel_overwrites is None:
+        return
+    default_role = channel.guild.default_role
+    original = running.original_channel_overwrites.get(default_role)
+    with suppress(discord.DiscordException):
+        await channel.set_permissions(default_role, overwrite=original)
+
+
+async def relock_channel(channel: discord.abc.Messageable, running: RunningGame) -> None:
+    """다음 라운드 시작 전 채널 재잠금"""
+    if not isinstance(channel, discord.TextChannel) or running.original_channel_overwrites is None:
+        return
+    with suppress(discord.DiscordException):
+        await channel.set_permissions(channel.guild.default_role, send_messages=False)
 
 
 async def restore_slowmode(channel: discord.abc.Messageable, running: RunningGame) -> None:
@@ -903,7 +920,8 @@ class SpeechTurnView(discord.ui.View):
 
 class DiscussionControlView(discord.ui.View):
     def __init__(self, running: RunningGame) -> None:
-        super().__init__(timeout=config.discussion_seconds + config.discussion_extension_seconds * config.max_discussion_extensions + 30)
+        num_players = len(running.game.players)
+        super().__init__(timeout=config.speech_seconds * num_players + config.discussion_extension_seconds * config.max_discussion_extensions + 30)
         self.running = running
         self.message: discord.Message | None = None
         self.current_speaker_id: int | None = None
@@ -1017,16 +1035,16 @@ class ContinueView(discord.ui.View):
         self.message: discord.Message | None = None
 
     def required_votes(self) -> int:
-        return len(self.running.participant_user_ids) // 2 + 1
+        return len(self.running.participant_user_ids)
 
     def status_text(self) -> str:
         return (
             f"같은 멤버로 다음 라운드를 진행할까요?\n"
             f"찬성: **{len(self.yes_votes)}/{self.required_votes()}표** 필요\n"
-            f"**{CONTINUE_VOTE_SECONDS}초** 안에 과반수 찬성 시 이어서 진행합니다."
+            f"**{CONTINUE_VOTE_SECONDS}초** 안에 전원 찬성 시 이어서 진행합니다."
         )
 
-    @discord.ui.button(label="이어하기 ✅", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="이어하기", style=discord.ButtonStyle.success)
     async def vote_continue(
         self,
         interaction: discord.Interaction,
@@ -1040,7 +1058,7 @@ class ContinueView(discord.ui.View):
             return
         self.yes_votes.add(interaction.user.id)
         if len(self.yes_votes) >= self.required_votes():
-            await send_interaction_reply(interaction, "과반수 달성! 다음 라운드를 시작합니다.", color=SUCCESS_EMBED_COLOR, private=True)
+            await send_interaction_reply(interaction, "전원 찬성! 다음 라운드를 시작합니다.", color=SUCCESS_EMBED_COLOR, private=True)
             self.done.set()
             self.stop()
         else:
@@ -1066,7 +1084,7 @@ async def run_continue_vote(channel: discord.abc.Messageable, running: RunningGa
     disable_view_items(view)
     reached = len(view.yes_votes) >= view.required_votes()
     if message:
-        suffix = "\n\n✅ 과반수 달성! 다음 라운드를 시작합니다." if reached else f"\n\n⏰ 시간 초과. ({len(view.yes_votes)}/{view.required_votes()}표) 이어하기가 취소됩니다."
+        suffix = "\n\n전원 찬성! 다음 라운드를 시작합니다." if reached else f"\n\n시간 초과. ({len(view.yes_votes)}/{view.required_votes()}표) 이어하기가 취소됩니다."
         with suppress(discord.DiscordException):
             await message.edit(
                 embed=make_embed(
@@ -1288,7 +1306,6 @@ async def run_discussion_phase(channel: discord.abc.Messageable, running: Runnin
     )
     await send_embed(
         channel,
-        f"토론 시간: **{duration_text(config.discussion_seconds)}**\n"
         f"발언 시간: 1인당 **{duration_text(config.speech_seconds)}**\n"
         f"연장: **{duration_text(config.discussion_extension_seconds)}**, 최대 **{config.max_discussion_extensions}회**\n\n"
         f"발언 순서\n{order_text}",
@@ -1299,41 +1316,40 @@ async def run_discussion_phase(channel: discord.abc.Messageable, running: Runnin
     control_message = await send_embed(channel, control_view.status_text(), title="토론 진행", view=control_view)
     control_view.message = control_message
 
-    deadline = time.monotonic() + config.discussion_seconds
-    speaker_index = 0
-    round_number = 1
     try:
-        while time.monotonic() < deadline and not control_view.skip_event.is_set():
-            player = speaking_order[speaker_index % len(speaking_order)]
-            if speaker_index and speaker_index % len(speaking_order) == 0:
-                round_number += 1
-                await send_embed(channel, f"발언 순서 {round_number}라운드를 시작합니다.", title="다음 라운드")
+        for order_position, player in enumerate(speaking_order):
+            if control_view.skip_event.is_set():
+                break
 
-            turn_seconds = config.speech_seconds
             control_view.set_current_speaker(player)
             await control_view.refresh_message()
             turn_view = SpeechTurnView(running, player)
+            order_display = "\n".join(
+                f"{'→ ' if i == order_position else '   '}{i + 1}. {p.name}"
+                for i, p in enumerate(speaking_order)
+            )
             turn_message = await send_embed(
                 channel,
                 f"현재 발언자: **{player.name}**\n"
-                f"제한 시간: **{duration_text(turn_seconds)}**\n"
-                "발언을 마치면 이 메시지의 `발언 완료` 버튼을 누르거나 `발언완료`라고 보내세요.",
+                f"제한 시간: **{duration_text(config.speech_seconds)}**\n"
+                "발언을 마치면 이 메시지의 `발언 완료` 버튼을 누르거나 `발언완료`라고 보내세요.\n\n"
+                f"발언 순서\n{order_display}",
                 title="발언 차례",
                 view=turn_view,
             )
             turn_view.message = turn_message
 
-            turn_deadline = time.monotonic() + turn_seconds
+            turn_deadline = time.monotonic() + config.speech_seconds
             try:
                 while time.monotonic() < turn_deadline:
                     remaining_turn = max(1, int(turn_deadline - time.monotonic()))
                     result = await wait_for_discussion_event(control_view, remaining_turn)
                     if result == "extend":
-                        deadline += config.discussion_extension_seconds
+                        turn_deadline += config.discussion_extension_seconds
                         await send_embed(
                             channel,
-                            f"토론 시간이 **{duration_text(config.discussion_extension_seconds)}** 연장되었습니다.",
-                            title="토론 연장",
+                            f"**{player.name}** 님의 발언 시간이 **{duration_text(config.discussion_extension_seconds)}** 연장되었습니다.",
+                            title="발언 연장",
                             color=SUCCESS_EMBED_COLOR,
                         )
                         await control_view.refresh_message()
@@ -1348,7 +1364,6 @@ async def run_discussion_phase(channel: discord.abc.Messageable, running: Runnin
                     with suppress(discord.DiscordException):
                         await turn_message.edit(view=turn_view)
 
-            speaker_index += 1
     finally:
         disable_view_items(control_view)
         if control_message:
@@ -1357,7 +1372,7 @@ async def run_discussion_phase(channel: discord.abc.Messageable, running: Runnin
         running.discussion_current_speaker_id = None
         running.discussion_current_speaker_name = ""
 
-    await send_embed(channel, "토론 시간이 끝났습니다. 투표로 넘어갑니다.", title="토론 종료")
+    await send_embed(channel, "모든 참가자가 발언을 마쳤습니다. 투표로 넘어갑니다.", title="토론 종료")
 
 
 async def game_loop(guild: discord.Guild, running: RunningGame) -> None:
@@ -1442,8 +1457,10 @@ async def game_loop(guild: discord.Guild, running: RunningGame) -> None:
                 update_session_scores(running)
                 await announce_final_result(channel, running)
 
+            await temporarily_unlock_channel(channel, running)
             if not game.winner or not config.continue_vote_enabled or not await run_continue_vote(channel, running):
                 break
+            await relock_channel(channel, running)
 
             # 다음 라운드 준비
             running.round_number += 1
@@ -1675,7 +1692,6 @@ async def show_categories(interaction: discord.Interaction, 검색어: str | Non
     최소인원="게임 시작 최소 인원",
     최대인원=f"게임 최대 인원. 최대 {MAX_GAME_PLAYERS}명",
     모집초="참가자 모집 시간",
-    토론초="토론 시간",
     발언초="한 사람당 발언 시간",
     연장초="토론 연장 1회당 추가 시간",
     최대연장="토론 연장 최대 횟수",
@@ -1692,7 +1708,6 @@ async def configure_game(
     최소인원: int | None = None,
     최대인원: int | None = None,
     모집초: int | None = None,
-    토론초: int | None = None,
     발언초: int | None = None,
     연장초: int | None = None,
     최대연장: int | None = None,
@@ -1713,8 +1728,6 @@ async def configure_game(
         config.max_player_count = 최대인원
     if 모집초 is not None:
         config.recruitment_seconds = 모집초
-    if 토론초 is not None:
-        config.discussion_seconds = 토론초
     if 발언초 is not None:
         config.speech_seconds = 발언초
     if 연장초 is not None:
@@ -1797,6 +1810,7 @@ async def show_leaderboard(
 ) -> None:
     metric = 기준.value if 기준 else "wins"
     await send_interaction_reply(interaction, leaderboard_text(metric), title="라이어게임 리더보드")
+
 
 
 @bot.tree.command(name="라이어전적초기화", description="라이어게임 전적을 초기화합니다.")
